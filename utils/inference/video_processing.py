@@ -17,6 +17,9 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 import kornia
 
+from basicsr.utils import img2tensor, tensor2img
+from torchvision.transforms.functional import normalize
+
 
 def add_audio_from_another_video(video_with_sound: str, 
                                  video_without_sound: str, 
@@ -241,8 +244,64 @@ def get_final_video(final_frames: List[np.ndarray],
         out.write(result_frames[i])
 
     out.release()
-    
 
+    
+def get_final_video_gfpgan(final_frames: List[np.ndarray],
+                           crop_frames: List[np.ndarray],
+                           full_frames: List[np.ndarray],
+                           tfm_array: List[np.ndarray],
+                           OUT_VIDEO_NAME: str,
+                           fps: float, 
+                           handler) -> None:
+    """
+    Create final video from frames
+    """
+
+    out = cv2.VideoWriter(f"{OUT_VIDEO_NAME}", cv2.VideoWriter_fourcc(*'mp4v'), fps, (full_frames[0].shape[1], full_frames[0].shape[0]))
+    size = (full_frames[0].shape[0], full_frames[0].shape[1])
+    params = [None for i in range(len(crop_frames))]
+    result_frames = full_frames.copy()
+    
+    for i in tqdm(range(len(full_frames))):
+        if i == len(full_frames):
+            break
+        for j in range(len(crop_frames)):
+            try:
+                swap = cv2.resize(final_frames[j][i], (224, 224))
+                
+                if len(crop_frames[j][i]) == 0:
+                    params[j] = None
+                    continue
+                    
+                landmarks = handler.get_without_detection_without_transform(swap)
+                if params[j] == None:     
+                    landmarks_tgt = handler.get_without_detection_without_transform(crop_frames[j][i])
+                    mask, params[j] = face_mask_static(swap, landmarks, landmarks_tgt, params[j])
+                else:
+                    mask = face_mask_static(swap, landmarks, landmarks_tgt, params[j])    
+                
+                mask = cv2.resize(mask, (512, 512))
+                swap = torch.from_numpy(final_frames[j][i]).cuda().permute(2,0,1).unsqueeze(0).type(torch.float32)
+                mask = torch.from_numpy(mask).cuda().unsqueeze(0).unsqueeze(0).type(torch.float32)
+                full_frame = torch.from_numpy(result_frames[i]).cuda().permute(2,0,1).unsqueeze(0)
+                mat = torch.from_numpy(tfm_array[j][i]*512/224).cuda().unsqueeze(0).type(torch.float32)
+                
+                mat_rev = kornia.invert_affine_transform(mat)
+                swap_t = kornia.warp_affine(swap, mat_rev, size)
+                mask_t = kornia.warp_affine(mask, mat_rev, size)
+                final = (mask_t*swap_t + (1-mask_t)*full_frame).type(torch.uint8).squeeze().permute(1,2,0).cpu().detach().numpy()
+                
+                result_frames[i] = final
+                torch.cuda.empty_cache()
+
+            except Exception as e:
+                pass
+                
+        out.write(result_frames[i])
+
+    out.release()
+    
+    
 class Frames(Dataset):
     def __init__(self, frames_list):
         self.frames_list = frames_list
@@ -282,4 +341,23 @@ def face_enhancement(final_frames: List[np.ndarray], model) -> List[np.ndarray]:
                 ff_i+=1
         enhanced_frames_all.append(enhanced_frames)
         
+    return enhanced_frames_all
+
+
+def face_enhancement_gfpgan(final_frames: List[np.ndarray], model, device) -> List[Any]:
+    enhanced_frames_all = []
+    for i in range(len(final_frames)):
+        enhanced_frames = []
+        for j in tqdm(range(len(final_frames[i]))):
+            try:
+                img = cv2.resize(final_frames[i][j], (512, 512))
+                cropped_face_t = img2tensor(img / 255., bgr2rgb=True, float32=True)
+                cropped_face_t = normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
+                cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
+                output = model(cropped_face_t, return_rgb=False)[0]
+                restored_face = tensor2img(output.squeeze(0), rgb2bgr=True, min_max=(-1, 1))
+                enhanced_frames.append(restored_face)
+            except:
+                enhanced_frames.append([])
+        enhanced_frames_all.append(enhanced_frames)      
     return enhanced_frames_all

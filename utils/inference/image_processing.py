@@ -77,6 +77,36 @@ def get_final_image(final_frames: List[np.ndarray],
     return final
 
 
+def get_final_image_gfpgan(final_frames: List[np.ndarray],
+                           crop_frames: List[np.ndarray],
+                           full_frame: np.ndarray,
+                           tfm_arrays: List[np.ndarray],
+                           handler) -> None:
+    """
+    Create final video from frames
+    """
+    final = full_frame.copy()
+    params = [None for i in range(len(final_frames))]
+    
+    for i in range(len(final_frames)):
+        frame = cv2.resize(final_frames[i][0], (224, 224))
+        
+        landmarks = handler.get_without_detection_without_transform(frame)     
+        landmarks_tgt = handler.get_without_detection_without_transform(crop_frames[i][0])
+
+        mask, _ = face_mask_static(crop_frames[i][0], landmarks, landmarks_tgt, params[i])
+        mask = cv2.resize(mask, (512, 512))
+        mat_rev = cv2.invertAffineTransform(tfm_arrays[i][0]*512/224)
+
+        swap_t = cv2.warpAffine(final_frames[i][0], mat_rev, (full_frame.shape[1], full_frame.shape[0]), borderMode=cv2.BORDER_REPLICATE)
+        mask_t = cv2.warpAffine(mask, mat_rev, (full_frame.shape[1], full_frame.shape[0]))
+        mask_t = np.expand_dims(mask_t, 2)
+
+        final = mask_t*swap_t + (1-mask_t)*final
+    final = np.array(final, dtype='uint8')
+    return final
+
+
 def show_images(images: List[np.ndarray], 
                 titles=None, 
                 figsize=(20, 5), 
